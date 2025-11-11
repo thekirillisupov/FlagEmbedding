@@ -7,6 +7,8 @@ import logging
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from typing import Dict, Optional, List, Union
+import torch.nn.functional as F
+
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +45,21 @@ class AbsRerankerModel(ABC, nn.Module):
         self.train_batch_size = train_batch_size
 
         self.yes_loc = self.tokenizer('Yes', add_special_tokens=False)['input_ids'][-1]
+        self.no_loc = self.tokenizer('No', add_special_tokens=False)['input_ids'][-1]
 
     def gradient_checkpointing_enable(self, **kwargs):
         """
         Activates gradient checkpointing for the current model.
         """
-        self.model.gradient_checkpointing_enable(**kwargs)
+        # before wrapping with DDP/Accelerate and before training
+        self.model.config.use_cache = False  # required when using gradient checkpointing
+        self.model.enable_input_require_grads()  # important for PEFT/LoRA
+
+        # HF >= 4.36 supports kwargs:
+        self.model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        #self.model.gradient_checkpointing_enable(**kwargs)
 
     def enable_input_require_grads(self, **kwargs):
         """
@@ -65,7 +76,11 @@ class AbsRerankerModel(ABC, nn.Module):
         """
         pass
 
-    def forward(self, pair: Union[Dict[str, Tensor], List[Dict[str, Tensor]]] = None, teacher_scores: Optional[Tensor] = None):
+    def forward(self, 
+        pair: Union[Dict[str, Tensor], List[Dict[str, Tensor]]] = None, 
+        teacher_scores: Optional[Tensor] = None,
+        **kwargs
+    ):
         """The computation performed at every call.
 
         Args:
@@ -76,6 +91,8 @@ class AbsRerankerModel(ABC, nn.Module):
             RerankerOutput: Output of reranker model.
         """
         ranker_logits = self.encode(pair) # (batch_size * num, dim)
+        
+        """ if using logits as teacher scores 
         if teacher_scores is not None:
             teacher_scores = torch.Tensor(teacher_scores)
             teacher_targets = teacher_scores.view(self.train_batch_size, -1)
@@ -89,6 +106,34 @@ class AbsRerankerModel(ABC, nn.Module):
                 teacher_targets = teacher_targets.to(grouped_logits.device)
                 # print(teacher_targets, torch.mean(torch.sum(torch.log_softmax(grouped_logits, dim=-1) * teacher_targets, dim=-1)))
                 loss += - torch.mean(torch.sum(torch.log_softmax(grouped_logits, dim=-1) * teacher_targets, dim=-1))
+        else:
+            loss = None
+        """
+
+        # if using relevance labels as teacher score
+        if teacher_scores is not None:
+            teacher_targets = torch.as_tensor(
+                teacher_scores,
+                dtype=ranker_logits.dtype,
+                device=ranker_logits.device
+            ).view(self.train_batch_size, -1)      
+
+        if self.training:
+            preds = ranker_logits.view(self.train_batch_size, -1)   # (B, num)
+
+            if teacher_scores is not None:
+                # * MSE regression against relevance labels *
+                #loss = F.mse_loss(preds, teacher_targets)
+                loss = F.cross_entropy(preds, teacher_targets)
+            else:
+                # fallback: whatever classification / list-wise
+                # loss you used before
+                target = torch.zeros(
+                    self.train_batch_size,
+                    device=preds.device,
+                    dtype=torch.long
+                )
+                loss = self.compute_loss(preds, target)
         else:
             loss = None
 

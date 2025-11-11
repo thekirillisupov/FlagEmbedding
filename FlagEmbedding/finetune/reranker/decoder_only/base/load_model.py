@@ -1,7 +1,7 @@
 import os
 import re
 import logging
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, Gemma3ForCausalLM
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel
 
 from FlagEmbedding.finetune.reranker.decoder_only.base.arguments import RerankerModelArguments
@@ -43,40 +43,36 @@ def get_model(model_args: RerankerModelArguments):
     Returns:
         transformers.PreTrainedModel or PeftModel: The loaded model.
     """
-    if model_args.config_name:
-        config = AutoConfig.from_pretrained(
-            model_args.config_name,
-            trust_remote_code=model_args.trust_remote_code,
-            token=model_args.token,
-            cache_dir=model_args.cache_dir
-        )
-    elif model_args.model_name_or_path:
-        config = AutoConfig.from_pretrained(
-            model_args.model_name_or_path,
-            trust_remote_code=model_args.trust_remote_code,
-            token=model_args.token,
-            cache_dir=model_args.cache_dir
-        )
-    else:
-        raise ValueError(
-            "You are instantiating a new config instance from scratch. This is not supported by this script."
-        )
-    config.use_cache = False
 
     if model_args.model_name_or_path:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_args.model_name_or_path,
-            # torch_dtype=torch.bfloat16,
-            use_flash_attention_2=True if model_args.use_flash_attn else False,
-            token=model_args.token,
-            cache_dir=model_args.cache_dir,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            config=config,
-            trust_remote_code=model_args.trust_remote_code,
-        )
+        model_kwargs = {
+            "token": model_args.token,
+            "cache_dir": model_args.cache_dir,
+            "from_tf": bool(".ckpt" in model_args.model_name_or_path),
+            #"config": config,
+            "trust_remote_code": model_args.trust_remote_code,
+        }
+        if model_args.use_flash_attn:
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+        
+        if model_args.model_format == 'gemma3':
+            print("Loading Gemma3ForCausalLM")
+            model = Gemma3ForCausalLM.from_pretrained(
+                model_args.model_name_or_path,
+                # torch_dtype=torch.bfloat16,
+                **model_kwargs
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_args.model_name_or_path,
+                # torch_dtype=torch.bfloat16,
+                **model_kwargs
+            )
+        model.config.use_cache = False
+        model_kwargs["config"] = model.config
     else:
         logger.info("Training new model from scratch")
-        model = model_args.from_config(config)
+        #model = model_args.from_config(config)
 
     if model_args.raw_peft is not None:
         for peft_path in model_args.raw_peft:
@@ -132,15 +128,20 @@ def save_merged_model(model_args: RerankerModelArguments, output_dir: str):
     config.use_cache = False
 
     if model_args.model_name_or_path:
+        model_kwargs = {
+            "token": model_args.token,
+            "cache_dir": model_args.cache_dir,
+            "from_tf": bool(".ckpt" in model_args.model_name_or_path),
+            "trust_remote_code": model_args.trust_remote_code,
+            "config": config,
+        }
+        if model_args.use_flash_attn:
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+        
         model = AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             # torch_dtype=torch.bfloat16,
-            use_flash_attention_2=True if model_args.use_flash_attn else False,
-            token=model_args.token,
-            cache_dir=model_args.cache_dir,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
-            trust_remote_code=model_args.trust_remote_code,
-            config=config,
+            **model_kwargs
         )
     else:
         logger.info("Training new model from scratch")

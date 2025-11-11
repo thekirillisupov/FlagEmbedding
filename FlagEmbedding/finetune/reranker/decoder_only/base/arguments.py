@@ -51,8 +51,19 @@ class RerankerModelArguments(AbsRerankerModelArguments):
     raw_peft: List[str] = field(
         default=None
     )
-    
+    #normalize: bool = field(
+    #    default=False,
+    #    metadata={"help": "Sigmoid apply to output score"}
+    #)
     save_merged_lora_model: bool = field(
         default=False,
         metadata={"help": "If passed, will merge the lora modules and save the entire model."}
+    )
+    model_format: str = field(
+        default='gemma',
+        metadata={"help": "Model format: 'gemma' (uses Gemma3ForCausalLM), 'qwen' (uses Qwen format), or 'auto' (uses AutoModelForCausalLM)."}
+    )
+    logit_calculation_type: str = field(
+        default='margin_score',
+        metadata={"help": "Type of logit calculation: 'margin_score' (yes_scores - no_scores) or 'only_yes' (just yes_scores)."}
     )

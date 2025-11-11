@@ -11,7 +11,6 @@ from torch.utils.data import Dataset, DataLoader
 from FlagEmbedding.abc.inference import AbsReranker
 from FlagEmbedding.inference.reranker.encoder_only.base import sigmoid
 
-
 def last_logit_pool(logits: Tensor,
                     attention_mask: Tensor) -> Tensor:
     """Pool the last logit.
@@ -217,6 +216,7 @@ class BaseLLMReranker(AbsReranker):
         normalize: bool = False,
         **kwargs: Any,
     ) -> None:
+        normalize = True # TODO remove
         super().__init__(
             model_name_or_path=model_name_or_path,
             use_fp16=use_fp16,
@@ -234,7 +234,7 @@ class BaseLLMReranker(AbsReranker):
         )
 
         self.prompt = prompt
-
+    
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name_or_path,
             cache_dir=cache_dir,
@@ -310,7 +310,7 @@ class BaseLLMReranker(AbsReranker):
         all_queries_inputs = []
         all_passages_inputs = []
         for start_index in trange(0, len(sentence_pairs), batch_size, desc="pre tokenize",
-                                  disable=len(sentence_pairs) < batch_size):
+                                  disable=True):
             sentences_batch = sentence_pairs[start_index:start_index + batch_size]
             queries = [s[0] for s in sentences_batch]
             passages = [s[1] for s in sentences_batch]
@@ -436,7 +436,7 @@ class BaseLLMReranker(AbsReranker):
 
         all_scores = []
         if dataloader is not None:
-            for inputs in tqdm(dataloader):
+            for inputs in dataloader:
                 inputs = inputs.to(device)
 
                 outputs = self.model(**inputs, output_hidden_states=True)
@@ -445,7 +445,7 @@ class BaseLLMReranker(AbsReranker):
                 scores = scores[:, self.yes_loc]
                 all_scores.extend(scores.cpu().float().tolist())
         else:
-            for batch_start in trange(0, len(all_queries_inputs_sorted), batch_size):
+            for batch_start in trange(0, len(all_queries_inputs_sorted), batch_size, disable=True):
                 queries_inputs = all_queries_inputs_sorted[batch_start:batch_start+batch_size]
                 passages_inputs = all_passages_inputs_sorted[batch_start:batch_start+batch_size]
 

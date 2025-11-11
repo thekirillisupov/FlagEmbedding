@@ -71,15 +71,87 @@ class AbsRerankerTrainDataset(Dataset):
         temp_dataset = datasets.load_dataset('json', data_files=file_path, split='train', cache_dir=self.args.cache_path)
         if len(temp_dataset) > self.args.max_example_num_per_dataset:
             temp_dataset = temp_dataset.select(random.sample(list(range(len(temp_dataset))), self.args.max_example_num_per_dataset))
+        
+        # Filter out examples with empty negative or positive passages
+        original_size = len(temp_dataset)
+        temp_dataset = temp_dataset.filter(
+            lambda x: (
+                (
+                    (len(x.get('neg', [])) > 0 if x.get('neg') is not None else False) or
+                    (len(x.get('negative', [])) > 0 if x.get('negative') is not None else False)
+                )
+                and
+                (
+                    (len(x.get('pos', [])) > 0 if x.get('pos') is not None else False) or
+                    (len(x.get('positive', [])) > 0 if x.get('positive') is not None else False)
+                )
+            )
+        )
+        if safe_rank == 0 and len(temp_dataset) < original_size:
+            logger.info(f'Filtered out {original_size - len(temp_dataset)} examples with empty negative passages from {file_path}')
+        
         if not self.args.knowledge_distillation:
-            if 'pos_scores' in temp_dataset.column_names:
-                temp_dataset = temp_dataset.remove_columns(['pos_scores'])
-            if 'neg_scores' in temp_dataset.column_names:
-                temp_dataset = temp_dataset.remove_columns(['neg_scores'])
+            # Remove score columns if not using knowledge distillation
+            columns_to_remove = []
+            for col in ['pos_scores', 'positive_scores', 'neg_scores', 'negative_scores']:
+                if col in temp_dataset.column_names:
+                    columns_to_remove.append(col)
+            if columns_to_remove:
+                temp_dataset = temp_dataset.remove_columns(columns_to_remove)
         else:
-            if 'pos_scores' not in temp_dataset.column_names or 'neg_scores' not in temp_dataset.column_names:
-                raise ValueError(f"`pos_scores` and `neg_scores` not found in the features of training data in {file_path}, which is necessary when using knowledge distillation.")
+            # Check for score columns with alternative names
+            has_pos_scores = 'pos_scores' in temp_dataset.column_names or 'positive_scores' in temp_dataset.column_names
+            has_neg_scores = 'neg_scores' in temp_dataset.column_names or 'negative_scores' in temp_dataset.column_names
+            if not has_pos_scores or not has_neg_scores:
+                raise ValueError(f"`pos_scores`/`positive_scores` and `neg_scores`/`negative_scores` not found in the features of training data in {file_path}, which is necessary when using knowledge distillation.")
         return temp_dataset
+
+    def _normalize_keys(self, data):
+        
+        """Normalize data keys to support both 'pos'/'positive' and 'neg'/'negative'.
+
+        Args:
+            data (dict): Input data dictionary.
+
+        Returns:
+            dict: Data with normalized keys ('pos', 'neg', 'pos_scores', 'neg_scores').
+        """
+        normalized = {}
+        
+        # Handle positive examples
+        if 'pos' in data and data['pos'] is not None:
+            normalized['pos'] = data['pos']
+        elif 'positive' in data and data['positive'] is not None:
+            normalized['pos'] = data['positive']
+        else:
+            raise KeyError("Data must contain either 'pos' or 'positive' key")
+     
+        # Handle negative examples
+        if 'neg' in data and data['neg'] is not None:
+            normalized['neg'] = data['neg']
+        elif 'negative' in data and data['negative'] is not None:
+            normalized['neg'] = data['negative']
+        else:
+            raise KeyError("Data must contain either 'neg' or 'negative' key")
+        
+        # Handle positive scores
+        if 'pos_scores' in data and data['pos_scores'] is not None:
+            normalized['pos_scores'] = data['pos_scores']
+        elif 'positive_scores' in data and data['positive_scores'] is not None:
+            normalized['pos_scores'] = data['positive_scores']
+        
+        # Handle negative scores
+        if 'neg_scores' in data and data['neg_scores'] is not None:
+            normalized['neg_scores'] = data['neg_scores']
+        elif 'negative_scores' in data and data['negative_scores'] is not None:
+            normalized['neg_scores'] = data['negative_scores']
+        
+        # Copy all other keys
+        for key in data:
+            if key not in ['pos', 'positive', 'neg', 'negative', 'pos_scores', 'positive_scores', 'neg_scores', 'negative_scores']:
+                normalized[key] = data[key]
+        
+        return normalized
 
     def _shuffle_text(self, text):
         """shuffle the input text.
@@ -125,7 +197,7 @@ class AbsRerankerTrainDataset(Dataset):
         return item
 
     def __getitem__(self, item):
-        data = self.dataset[item]
+        data = self._normalize_keys(self.dataset[item])
         train_group_size = self.args.train_group_size
 
         query = data['query']
@@ -229,7 +301,7 @@ class AbsLLMRerankerTrainDataset(AbsRerankerTrainDataset):
         )['input_ids']
 
     def __getitem__(self, item) -> List[BatchEncoding]:
-        data = self.dataset[item]
+        data = self._normalize_keys(self.dataset[item])
         train_group_size = self.args.train_group_size
 
         query = data['query']
@@ -244,21 +316,37 @@ class AbsLLMRerankerTrainDataset(AbsRerankerTrainDataset):
 
         assert isinstance(data['pos'], list) and isinstance(data['neg'], list)
 
-        pos_idx = random.choice(list(range(len(data['pos']))))
-        passages.append(self._shuffle_text(data['pos'][pos_idx]))
+        # choose max(pos_all_idx, train_group_size - 1) positive passages
+        # fill the rest with negative passages 
+        num_pos = min(len(data['pos']), train_group_size - 1)
+        pos_all_idx = list(range(len(data['pos'])))
 
-        neg_all_idx = list(range(len(data['neg'])))
-        if len(data['neg']) < train_group_size - 1:
-            num = math.ceil((train_group_size - 1) / len(data['neg']))
-            neg_idxs = random.sample(neg_all_idx * num, train_group_size - 1)
+        if num_pos > 0:
+            pos_idxs = random.sample(pos_all_idx, num_pos) if len(pos_all_idx) > num_pos else pos_all_idx
+            for pos_idx in pos_idxs:
+                passages.append(self._shuffle_text(data['pos'][pos_idx]))
         else:
-            neg_idxs = random.sample(neg_all_idx, self.args.train_group_size - 1)
+            pos_idxs = []
+
+        num_neg = train_group_size - len(passages)
+        neg_all_idx = list(range(len(data['neg'])))
+        if len(data['neg']) == 0:
+            neg_idxs = []
+        elif len(data['neg']) < num_neg:
+            num = math.ceil(num_neg / len(data['neg']))
+            neg_idxs = random.sample(neg_all_idx * num, num_neg)
+        else:
+            neg_idxs = random.sample(neg_all_idx, num_neg)
         for neg_idx in neg_idxs:
             passages.append(data['neg'][neg_idx])
 
+        # currentlu suggest that first passage is positive
+        # it can be change for custom datasets
+        
         if self.args.knowledge_distillation:
             assert isinstance(data['pos_scores'], list) and isinstance(data['neg_scores'], list)
-            teacher_scores.append(data['pos_scores'][pos_idx])
+            for pos_idx in pos_idxs:
+                teacher_scores.append(data['pos_scores'][pos_idx])
             for neg_idx in neg_idxs:
                 teacher_scores.append(data['neg_scores'][neg_idx])
             if not all(isinstance(score, (int, float)) for score in teacher_scores):
@@ -337,6 +425,124 @@ class AbsLLMRerankerTrainDataset(AbsRerankerTrainDataset):
         return passages_inputs, teacher_scores
 
 
+class AbsLLMRerankerQwenTrainDataset(AbsLLMRerankerTrainDataset):
+    """Qwen-specific LLM reranker training dataset with Qwen chat format.
+
+    Args:
+        args (AbsRerankerDataArguments): Data arguments.
+        tokenizer (PreTrainedTokenizer): Tokenizer to use.
+    """
+    def __init__(
+        self,
+        args: AbsRerankerDataArguments,
+        tokenizer: PreTrainedTokenizer
+    ):
+        super().__init__(args, tokenizer)
+        
+        # Qwen-specific formatting using chat template
+        self.system_message = "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\"."
+        self.instruction = "Given a web search query, retrieve relevant passages that answer the query"
+
+    def __getitem__(self, item) -> List[BatchEncoding]:
+        data = self._normalize_keys(self.dataset[item])
+        train_group_size = self.args.train_group_size
+
+        query = data['query']
+        if self.args.query_instruction_for_rerank is not None:
+            query = self.args.query_instruction_format.format(
+                data['query_prompt'] if 'query_prompt' in data else self.args.query_instruction_for_rerank,
+                query
+            )
+
+        passages = []
+        teacher_scores = []
+
+        assert isinstance(data['pos'], list) and isinstance(data['neg'], list)
+
+        # choose max(pos_all_idx, train_group_size - 1) positive passages
+        # fill the rest with negative passages 
+        num_pos = min(len(data['pos']), train_group_size - 1)
+        pos_all_idx = list(range(len(data['pos'])))
+
+        if num_pos > 0:
+            pos_idxs = random.sample(pos_all_idx, num_pos) if len(pos_all_idx) > num_pos else pos_all_idx
+            for pos_idx in pos_idxs:
+                passages.append(self._shuffle_text(data['pos'][pos_idx]))
+        else:
+            pos_idxs = []
+
+        num_neg = train_group_size - len(passages)
+        neg_all_idx = list(range(len(data['neg'])))
+        if len(data['neg']) == 0:
+            neg_idxs = []
+        elif len(data['neg']) < num_neg:
+            num = math.ceil(num_neg / len(data['neg']))
+            neg_idxs = random.sample(neg_all_idx * num, num_neg)
+        else:
+            neg_idxs = random.sample(neg_all_idx, num_neg)
+        for neg_idx in neg_idxs:
+            passages.append(data['neg'][neg_idx])
+
+        # currentlu suggest that first passage is positive
+        # it can be change for custom datasets
+        
+        if self.args.knowledge_distillation:
+            assert isinstance(data['pos_scores'], list) and isinstance(data['neg_scores'], list)
+            for pos_idx in pos_idxs:
+                teacher_scores.append(data['pos_scores'][pos_idx])
+            for neg_idx in neg_idxs:
+                teacher_scores.append(data['neg_scores'][neg_idx])
+            if not all(isinstance(score, (int, float)) for score in teacher_scores):
+                raise ValueError(f"pos_score or neg_score must be digit")
+        else:
+            teacher_scores = None
+
+        if self.args.passage_instruction_for_rerank is not None:
+            passages = [
+                self.args.passage_instruction_format.format(
+                    data['passage_prompt'] if 'passage_prompt' in data else self.args.passage_instruction_for_rerank, p
+                )
+                for p in passages
+            ]
+
+        # Format query and documents using Qwen chat template
+        passages_inputs = []
+        for i, passage in enumerate(passages):
+
+            messages = [
+                {
+                    "role": "system", 
+                    "content": self.system_message
+                },
+                {
+                    "role": "user", 
+                    "content": f"<Instruct>: {self.instruction}\n<Query>: {query}\n<Document>: {passage}"
+                }
+            ]
+
+            formatted_input = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False
+            )
+            
+            encoded = self.tokenizer(
+                formatted_input,
+                return_tensors=None,
+                max_length=self.max_length,
+                truncation=True,
+                add_special_tokens=False
+            )
+            
+            encoded['attention_mask'] = [1] * len(encoded['input_ids'])
+            encoded.pop('token_type_ids') if 'token_type_ids' in encoded.keys() else None
+            if 'position_ids' in encoded.keys():
+                encoded['position_ids'] = list(range(len(encoded['input_ids'])))
+            passages_inputs.append(encoded)
+
+        return passages_inputs, teacher_scores
+
+
 @dataclass
 class AbsLLMRerankerCollator(DataCollatorForSeq2Seq):
     """
@@ -344,6 +550,7 @@ class AbsLLMRerankerCollator(DataCollatorForSeq2Seq):
     and pass batch separately to the actual collator.
     Abstract out data detail for the model.
     """
+    # default values - not used if specified in args
     query_max_len: int = 32
     passage_max_len: int = 128
 

@@ -308,7 +308,7 @@ class AbsReranker(ABC):
 
         output_queue = pool["output"]
         results_list = sorted(
-            [output_queue.get() for _ in trange(last_chunk_id, desc="Chunks")],
+            [output_queue.get() for _ in trange(last_chunk_id, desc="Chunks", disable=True)],
             key=lambda x: x[0],
         )
         scores = np.concatenate([result[1] for result in results_list])

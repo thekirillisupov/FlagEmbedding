@@ -71,6 +71,7 @@ class DecoderOnlyRerankerRunner(AbsRerankerRunner):
             base_model,
             tokenizer=tokenizer,
             train_batch_size=self.training_args.per_device_train_batch_size,
+            logit_calculation_type=self.model_args.logit_calculation_type,
         )
 
         if self.training_args.gradient_checkpointing:

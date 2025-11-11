@@ -6,6 +6,7 @@ from typing import Optional
 
 from FlagEmbedding.abc.finetune.reranker import AbsRerankerTrainer
 from peft import get_peft_model_state_dict
+from torch.nn.parallel import DistributedDataParallel
 
 logger = logging.getLogger(__name__)
 

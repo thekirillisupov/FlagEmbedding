@@ -15,7 +15,8 @@ from .AbsTrainer import AbsRerankerTrainer
 from .AbsModeling import AbsRerankerModel
 from .AbsDataset import (
     AbsRerankerTrainDataset, AbsRerankerCollator,
-    AbsLLMRerankerTrainDataset, AbsLLMRerankerCollator
+    AbsLLMRerankerTrainDataset, AbsLLMRerankerCollator,
+    AbsLLMRerankerQwenTrainDataset
 )
 
 logger = logging.getLogger(__name__)
@@ -105,10 +106,20 @@ class AbsRerankerRunner(ABC):
                 tokenizer=self.tokenizer
             )
         else:
-            train_dataset = AbsLLMRerankerTrainDataset(
-                args=self.data_args,
-                tokenizer=self.tokenizer
-            )
+            # Select dataset based on model_format
+            if self.model_args.model_format == 'qwen':
+                print("AbsLLMRerankerQwenTrainDataset")
+                train_dataset = AbsLLMRerankerQwenTrainDataset(
+                    args=self.data_args,
+                    tokenizer=self.tokenizer
+                )
+            else:
+                # Default to Gemma format
+                print("AbsLLMRerankerTrainDataset")
+                train_dataset = AbsLLMRerankerTrainDataset(
+                    args=self.data_args,
+                    tokenizer=self.tokenizer
+                )
         return train_dataset
 
     def load_data_collator(self) -> AbsRerankerCollator:

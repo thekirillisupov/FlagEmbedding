@@ -64,6 +64,21 @@ class AbsRerankerDataArguments:
     )
     train_group_size: int = field(default=8)
 
+    max_passages_per_sample: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Maximum number of passages per sample. If set and train_group_size exceeds this, "
+                    "dataset samples will be split into multiple smaller samples. Useful for handling large batches."
+        }
+    )
+
+    point_wise: bool = field(
+        default=False,
+        metadata={
+            "help": "If True, uses all positive passages; if False, randomly samples one positive passage per sample."
+        }
+    )
+
     query_max_len: int = field(
         default=32,
         metadata={

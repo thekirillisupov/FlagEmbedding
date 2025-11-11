@@ -144,3 +144,18 @@ pic2.py
 # results
 en_results
 zh_results
+bge-gemma-reranker-sft
+cache
+mlruns
+research/Matroyshka_reranker/data_cache/*
+test_decoder_only_base_bge-reranker-v2-gemma/*
+decoder_gemma_3_rnd_4b_gemma/
+*.jsonl
+*.jsonl
+*.json
+nohup.out
+offline_web_asessment.py
+SEQ2SEQ_TRAINING_README.md
+FlagEmbedding/finetune/reranker/encoder_decoder
+output/
+research/Matroyshka_reranker/
