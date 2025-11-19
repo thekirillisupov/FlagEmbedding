@@ -124,6 +124,12 @@ class AbsRerankerModel(ABC, nn.Module):
             if teacher_scores is not None:
                 # * MSE regression against relevance labels *
                 #loss = F.mse_loss(preds, teacher_targets)
+                #
+                # 1. teacher scores: r,s,n 
+                # data: query, pos=[r], neg=[s,n], teacher_scores = [score for union(r,s,n)]
+                # 2. custom loss
+                loss = F.cross_entropy(preds, teacher_targets)
+            elif self.args.point_wise:
                 loss = F.cross_entropy(preds, teacher_targets)
             else:
                 # fallback: whatever classification / list-wise

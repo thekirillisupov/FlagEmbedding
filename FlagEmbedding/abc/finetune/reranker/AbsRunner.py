@@ -111,7 +111,8 @@ class AbsRerankerRunner(ABC):
                 print("AbsLLMRerankerQwenTrainDataset")
                 train_dataset = AbsLLMRerankerQwenTrainDataset(
                     args=self.data_args,
-                    tokenizer=self.tokenizer
+                    tokenizer=self.tokenizer,
+                    point_wise=self.data_args.point_wise,
                 )
             else:
                 # Default to Gemma format

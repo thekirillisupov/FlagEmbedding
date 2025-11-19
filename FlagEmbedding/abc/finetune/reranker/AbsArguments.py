@@ -62,7 +62,7 @@ class AbsRerankerDataArguments:
     cache_path: Optional[str] = field(
         default=None, metadata={"help": "Where do you want to store the cached data"}
     )
-    train_group_size: int = field(default=8)
+    train_group_size: Optional[int] = field(default=8)
 
     max_passages_per_sample: Optional[int] = field(
         default=None,

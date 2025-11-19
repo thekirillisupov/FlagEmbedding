@@ -4,6 +4,7 @@ import random
 import logging
 import datasets
 import numpy as np
+import torch
 import torch.distributed as dist
 from dataclasses import dataclass
 from torch.utils.data import Dataset
@@ -146,6 +147,10 @@ class AbsRerankerTrainDataset(Dataset):
         elif 'negative_scores' in data and data['negative_scores'] is not None:
             normalized['neg_scores'] = data['negative_scores']
         
+        if self.args.point_wise:
+            normalized['pos_scores'] = [1 for _ in range(len(data['pos']))]
+            normalized['neg_scores'] = [0 for _ in range(len(data['neg']))]
+
         # Copy all other keys
         for key in data:
             if key not in ['pos', 'positive', 'neg', 'negative', 'pos_scores', 'positive_scores', 'neg_scores', 'negative_scores']:
@@ -428,39 +433,133 @@ class AbsLLMRerankerTrainDataset(AbsRerankerTrainDataset):
 class AbsLLMRerankerQwenTrainDataset(AbsLLMRerankerTrainDataset):
     """Qwen-specific LLM reranker training dataset with Qwen chat format.
 
-    Args:
-        args (AbsRerankerDataArguments): Data arguments.
-        tokenizer (PreTrainedTokenizer): Tokenizer to use.
+    Supports both list-wise (default) and point-wise sampling controlled via ``AbsRerankerDataArguments.point_wise``.
     """
+
+    DEFAULT_SYSTEM_MESSAGE = (
+        'Judge whether the Document meets the requirements based on the Query and the Instruct provided. '
+        'Note that the answer can only be "yes" or "no".'
+    )
+    DEFAULT_INSTRUCTION = "Given a web search query, retrieve relevant passages that answer the query"
+
     def __init__(
         self,
         args: AbsRerankerDataArguments,
-        tokenizer: PreTrainedTokenizer
+        tokenizer: PreTrainedTokenizer,
+        system_message: str = None,
+        instruction: str = None,
+        point_wise: bool = False,
     ):
         super().__init__(args, tokenizer)
-        
-        # Qwen-specific formatting using chat template
-        self.system_message = "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\"."
-        self.instruction = "Given a web search query, retrieve relevant passages that answer the query"
+
+        self.system_message = system_message or self.DEFAULT_SYSTEM_MESSAGE
+        self.instruction = instruction or self.DEFAULT_INSTRUCTION
+
+        self._point_wise = point_wise
+        self._pointwise_indices = None
+        if self._point_wise:
+            self._pointwise_indices = self._build_pointwise_indices()
+
+    def __len__(self):
+        if self._point_wise and self._pointwise_indices is not None:
+            return len(self._pointwise_indices)
+        return super().__len__()
 
     def __getitem__(self, item) -> List[BatchEncoding]:
-        data = self._normalize_keys(self.dataset[item])
-        train_group_size = self.args.train_group_size
+        if self._point_wise:
+            return self._getitem_pointwise(item)
+        return self._getitem_groupwise(item)
 
+    def _getitem_groupwise(self, item):
+        data = self._normalize_keys(self.dataset[item])
+        query = self._format_query(data)
+
+        passages, pos_idxs, neg_idxs = self._sample_passages(data)
+
+        teacher_scores = self._collect_group_teacher_scores(data, pos_idxs, neg_idxs)
+
+        passages = [self._format_passage(data, passage) for passage in passages]
+        passages_inputs = [self._encode_qwen_pair(query, passage) for passage in passages]
+
+        return passages_inputs, teacher_scores
+
+    def _getitem_pointwise(self, item):
+        row_idx, is_pos, passage_idx = self._pointwise_indices[item]
+        data = self._normalize_keys(self.dataset[row_idx])
+        query = self._format_query(data)
+
+        passage_candidates = data['pos'] if is_pos else data['neg']
+        passage = passage_candidates[passage_idx]
+        passage = self._shuffle_text(passage)
+        passage = self._format_passage(data, passage)
+
+        encoded = self._encode_qwen_pair(query, passage)
+        teacher_scores = None
+
+        # default for point-wise mode using teacher scores
+        score_key = 'pos_scores' if is_pos else 'neg_scores'
+        teacher_scores = [data[score_key][passage_idx]]
+        if not isinstance(teacher_scores[0], (int, float)):
+            raise ValueError("pos_score or neg_score must be digit")
+
+        return encoded, teacher_scores
+
+    def _format_query(self, data):
         query = data['query']
         if self.args.query_instruction_for_rerank is not None:
-            query = self.args.query_instruction_format.format(
-                data['query_prompt'] if 'query_prompt' in data else self.args.query_instruction_for_rerank,
-                query
-            )
+            prompt = data['query_prompt'] if 'query_prompt' in data else self.args.query_instruction_for_rerank
+            query = self.args.query_instruction_format.format(prompt, query)
+        return query
+
+    def _format_passage(self, data, passage):
+        if self.args.passage_instruction_for_rerank is not None:
+            passage_prompt = data['passage_prompt'] if 'passage_prompt' in data else self.args.passage_instruction_for_rerank
+            passage = self.args.passage_instruction_format.format(passage_prompt, passage)
+        return passage
+
+    def _encode_qwen_pair(self, query, passage):
+        messages = [
+            {
+                "role": "system",
+                "content": self.system_message
+            },
+            {
+                "role": "user",
+                "content": f"<Instruct>: {self.instruction}\n<Query>: {query}\n<Document>: {passage}"
+            }
+        ]
+
+        formatted_input = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False
+        )
+
+        encoded = self.tokenizer(
+            formatted_input,
+            return_tensors=None,
+            max_length=self.max_length,
+            truncation=True,
+            add_special_tokens=False
+        )
+
+        encoded['attention_mask'] = [1] * len(encoded['input_ids'])
+        encoded.pop('token_type_ids') if 'token_type_ids' in encoded.keys() else None
+        if 'position_ids' in encoded.keys():
+            encoded['position_ids'] = list(range(len(encoded['input_ids'])))
+
+        return encoded
+
+    def _sample_passages(self, data):
+        train_group_size = self.args.train_group_size
 
         passages = []
-        teacher_scores = []
+        pos_idxs = []
+        neg_idxs = []
 
         assert isinstance(data['pos'], list) and isinstance(data['neg'], list)
 
-        # choose max(pos_all_idx, train_group_size - 1) positive passages
-        # fill the rest with negative passages 
         num_pos = min(len(data['pos']), train_group_size - 1)
         pos_all_idx = list(range(len(data['pos'])))
 
@@ -468,8 +567,6 @@ class AbsLLMRerankerQwenTrainDataset(AbsLLMRerankerTrainDataset):
             pos_idxs = random.sample(pos_all_idx, num_pos) if len(pos_all_idx) > num_pos else pos_all_idx
             for pos_idx in pos_idxs:
                 passages.append(self._shuffle_text(data['pos'][pos_idx]))
-        else:
-            pos_idxs = []
 
         num_neg = train_group_size - len(passages)
         neg_all_idx = list(range(len(data['neg'])))
@@ -483,65 +580,33 @@ class AbsLLMRerankerQwenTrainDataset(AbsLLMRerankerTrainDataset):
         for neg_idx in neg_idxs:
             passages.append(data['neg'][neg_idx])
 
-        # currentlu suggest that first passage is positive
-        # it can be change for custom datasets
-        
-        if self.args.knowledge_distillation:
-            assert isinstance(data['pos_scores'], list) and isinstance(data['neg_scores'], list)
-            for pos_idx in pos_idxs:
-                teacher_scores.append(data['pos_scores'][pos_idx])
-            for neg_idx in neg_idxs:
-                teacher_scores.append(data['neg_scores'][neg_idx])
-            if not all(isinstance(score, (int, float)) for score in teacher_scores):
-                raise ValueError(f"pos_score or neg_score must be digit")
-        else:
-            teacher_scores = None
+        return passages, pos_idxs, neg_idxs
 
-        if self.args.passage_instruction_for_rerank is not None:
-            passages = [
-                self.args.passage_instruction_format.format(
-                    data['passage_prompt'] if 'passage_prompt' in data else self.args.passage_instruction_for_rerank, p
-                )
-                for p in passages
-            ]
+    def _collect_group_teacher_scores(self, data, pos_idxs, neg_idxs):
+        if not self.args.knowledge_distillation:
+            return None
 
-        # Format query and documents using Qwen chat template
-        passages_inputs = []
-        for i, passage in enumerate(passages):
+        assert isinstance(data['pos_scores'], list) and isinstance(data['neg_scores'], list)
+        teacher_scores = []
+        for pos_idx in pos_idxs:
+            teacher_scores.append(data['pos_scores'][pos_idx])
+        for neg_idx in neg_idxs:
+            teacher_scores.append(data['neg_scores'][neg_idx])
+        if not all(isinstance(score, (int, float)) for score in teacher_scores):
+            raise ValueError("pos_score or neg_score must be digit")
+        return teacher_scores
 
-            messages = [
-                {
-                    "role": "system", 
-                    "content": self.system_message
-                },
-                {
-                    "role": "user", 
-                    "content": f"<Instruct>: {self.instruction}\n<Query>: {query}\n<Document>: {passage}"
-                }
-            ]
-
-            formatted_input = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False
-            )
-            
-            encoded = self.tokenizer(
-                formatted_input,
-                return_tensors=None,
-                max_length=self.max_length,
-                truncation=True,
-                add_special_tokens=False
-            )
-            
-            encoded['attention_mask'] = [1] * len(encoded['input_ids'])
-            encoded.pop('token_type_ids') if 'token_type_ids' in encoded.keys() else None
-            if 'position_ids' in encoded.keys():
-                encoded['position_ids'] = list(range(len(encoded['input_ids'])))
-            passages_inputs.append(encoded)
-
-        return passages_inputs, teacher_scores
+    def _build_pointwise_indices(self):
+        indices = []
+        for row_idx in range(len(self.dataset)):
+            data = self._normalize_keys(self.dataset[row_idx])
+            pos_cnt = len(data['pos'])
+            neg_cnt = len(data['neg'])
+            indices.extend((row_idx, True, pos_idx) for pos_idx in range(pos_cnt))
+            indices.extend((row_idx, False, neg_idx) for neg_idx in range(neg_cnt))
+        if not indices:
+            raise ValueError("Point-wise mode requires at least one passage.")
+        return indices
 
 
 @dataclass
