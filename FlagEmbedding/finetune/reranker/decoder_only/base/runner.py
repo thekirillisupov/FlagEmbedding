@@ -10,7 +10,7 @@ from FlagEmbedding.abc.finetune.reranker import AbsRerankerRunner, AbsRerankerMo
 
 from .modeling import CrossDecoderModel
 from .arguments import RerankerModelArguments
-from .trainer import DecoderOnlyRerankerTrainer
+from .trainer import DecoderOnlyRerankerTrainer, DecoderOnlyRerankerTrainerWithoutShuffle
 from .load_model import get_model, save_merged_model
 
 logger = logging.getLogger(__name__)
@@ -79,19 +79,26 @@ class DecoderOnlyRerankerRunner(AbsRerankerRunner):
 
         return tokenizer, model
 
-    def load_trainer(self) -> DecoderOnlyRerankerTrainer:
+    def load_trainer(self):
         """Load the trainer.
-
-        Returns:
-            DecoderOnlyRerankerTrainer: Loaded trainer instance.
         """
-        trainer = DecoderOnlyRerankerTrainer(
-            model=self.model,
-            args=self.training_args,
-            train_dataset=self.train_dataset,
-            data_collator=self.data_collator,
-            tokenizer=self.tokenizer
-        )
+        if self.data_args.point_wise:
+            trainer = DecoderOnlyRerankerTrainerWithoutShuffle(
+                model=self.model,
+                args=self.training_args,
+                train_dataset=self.train_dataset,
+                data_collator=self.data_collator,
+                tokenizer=self.tokenizer
+            )
+        else:
+            trainer = DecoderOnlyRerankerTrainer(
+                model=self.model,
+                args=self.training_args,
+                train_dataset=self.train_dataset,
+                data_collator=self.data_collator,
+                tokenizer=self.tokenizer
+            )
+
         return trainer
 
     def run(self):

@@ -7,6 +7,7 @@ from typing import Optional
 from FlagEmbedding.abc.finetune.reranker import AbsRerankerTrainer
 from peft import get_peft_model_state_dict
 from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data import DataLoader, DistributedSampler, SequentialSampler
 
 logger = logging.getLogger(__name__)
 
@@ -51,3 +52,33 @@ class DecoderOnlyRerankerTrainer(AbsRerankerTrainer):
         #     if self.args.process_index <= 0:
         #         torch.save(lora_state_dict, os.path.join(output_dir, "adapter_model.bin"))
         #         print(f"Save adapter model at {output_dir}")
+
+
+
+class DecoderOnlyRerankerTrainerWithoutShuffle(DecoderOnlyRerankerTrainer):
+    """
+    Trainer class for decoder only reranker models without shuffle.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def get_train_dataloader(self):
+        if self.args.world_size > 1:
+                sampler = DistributedSampler(
+                    self.train_dataset,
+                    num_replicas=self.args.world_size,
+                    rank=self.args.process_index,
+                    shuffle=False,
+                    drop_last=self.args.dataloader_drop_last,
+                )
+        else:
+            sampler = SequentialSampler(self.train_dataset)
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.args.train_batch_size,
+            sampler=sampler,
+            collate_fn=self.data_collator,
+            drop_last=self.args.dataloader_drop_last,
+            num_workers=self.args.dataloader_num_workers,
+            pin_memory=self.args.dataloader_pin_memory,
+        )
